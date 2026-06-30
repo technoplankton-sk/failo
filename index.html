@@ -19,7 +19,6 @@
         button:hover { background: #218838; }
         .error-msg { color: #dc3545; font-size: 14px; display: none; }
 
-        /* Окно выбора пользователя */
         #user-select { display: none; gap: 15px; margin-top: 15px; }
         .user-btn { background: #007bff; padding: 12px; font-size: 18px; font-weight: bold; }
         .user-btn:hover { background: #0056b3; }
@@ -95,25 +94,25 @@
     <script>
         const HASHED_PASSWORD = "7e5ae8620fc5ac135465b24fdba97f058fe5c752aa99328d4f97d156ff6fdf9e"; // Пароль "4354"
 
-        // НАСТРОЙКА: Сюда нужно будет вставить свои данные из Firebase Консоли
+        // Твоя конфигурация Firebase
         const firebaseConfig = {
-            apiKey: "ВСТАВЬ_СВОЙ_API_KEY",
-            authDomain: "ТВОЙ_PROJECT_ID.firebaseapp.com",
-            databaseURL: "https://ТВОЙ_PROJECT_ID-default-rtdb.firebaseio.com",
-            projectId: "ТВОЙ_PROJECT_ID",
-            storageBucket: "ТВОЙ_PROJECT_ID.appspot.com",
-            messagingSenderId: "ТВОЙ_ОТПРАВИТЕЛЬ",
-            appId: "ТВОЙ_APP_ID"
+            apiKey: "AIzaSyBqwZxOIWjPvNfajuxGCK6wNt4G0NYvlRY",
+            authDomain: "failo-a5451.firebaseapp.com",
+            projectId: "failo-a5451",
+            storageBucket: "failo-a5451.firebasestorage.app",
+            messagingSenderId: "837963381464",
+            appId: "1:837963381464:web:735ef5077cc1c022a935ad",
+            databaseURL: "https://failo-a5451-default-rtdb.firebaseio.com"
         };
 
-        // Инициализируем Firebase
+        // Инициализация Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
 
         let peer = null;
         let conn = null;
-        let myRole = '';    // 'dima' или 'valera'
-        let peerRole = '';  // 'valera' или 'dima'
+        let myRole = '';    
+        let peerRole = '';  
 
         async function sha256(string) {
             const utf8 = new TextEncoder().encode(string);
@@ -150,22 +149,21 @@
             peer = new Peer();
 
             peer.on('open', (id) => {
-                document.getElementById('network-status').innerText = 'ID получен. Синхронизация с базой...';
+                document.getElementById('network-status').innerText = 'Синхронизация с базой...';
                 
-                // Записываем наш ID в базу данных Firebase
+                // Записываем ID в базу
                 db.ref('online/' + myRole).set({
                     id: id,
                     timestamp: firebase.database.ServerValue.TIMESTAMP
                 });
 
-                // При закрытии вкладки автоматически очищаем свой ID в базе
+                // Авто-удаление при закрытии вкладки
                 db.ref('online/' + myRole).onDisconnect().remove();
 
-                // Начинаем следить за ID друга в базе данных
+                // Слушаем появление друга в сети
                 listenForPeer();
             });
 
-            // На случай, если друг подключился к нам раньше, чем мы к нему
             peer.on('connection', (incomingConn) => {
                 if (conn) return;
                 conn = incomingConn;
@@ -176,13 +174,12 @@
         function listenForPeer() {
             db.ref('online/' + peerRole).on('value', (snapshot) => {
                 const data = snapshot.val();
-                // Если друг в сети и мы еще не подключены
                 if (data && data.id && !conn) {
-                    document.getElementById('network-status').innerText = 'Друг обнаружен. Соединение...';
+                    document.getElementById('network-status').innerText = 'Друг в сети. Соединение...';
                     conn = peer.connect(data.id);
                     setupConnectionHandlers();
                 } else if (!data) {
-                    document.getElementById('network-status').innerText = 'Ожидаем подключения друга...';
+                    document.getElementById('network-status').innerText = 'Ожидаем подключение друга...';
                 }
             });
         }
@@ -212,6 +209,7 @@
             });
         }
 
+        // Отправка сообщений
         function sendMessage() {
             const input = document.getElementById('msg-input');
             const text = input.value.trim();
@@ -222,6 +220,7 @@
             input.value = '';
         }
 
+        // Отправка файлов
         function sendFile() {
             const fileInput = document.getElementById('file-input');
             const file = fileInput.files[0];
@@ -265,7 +264,7 @@
             document.getElementById('msg-input').disabled = true;
             document.getElementById('send-btn').disabled = true;
             document.getElementById('file-selector-label').style.display = 'none';
-            document.getElementById('network-status').innerText = 'Соединение разорвано. Ждем возврата...';
+            document.getElementById('network-status').innerText = 'Соединение разорвано. Ожидание...';
         }
     </script>
 </body>
