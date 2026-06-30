@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P Чат и Файлообменник (Secure)</title>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        body { background: #1e1e24; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        
+        /* Стили экрана блокировки */
+        #auth-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #111; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 1000; }
+        .auth-box { background: #222; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: center; }
+        input, button { padding: 10px; margin: 10px 0; border: none; border-radius: 4px; font-size: 16px; }
+        input[type="text"], input[type="password"] { background: #333; color: #fff; width: 250px; }
+        button { background: #28a745; color: #fff; cursor: pointer; width: 100%; }
+        button:hover { background: #218838; }
+        .error-msg { color: #dc3545; font-size: 14px; display: none; }
+
+        /* Стили основного интерфейса */
+        #main-container { display: none; width: 90%; max-width: 900px; height: 85vh; background: #2a2a32; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.6); }
+        .grid { display: flex; height: 100%; }
+        .sidebar { width: 30%; background: #202026; padding: 20px; display: flex; flex-direction: column; gap: 20px; border-right: 1px solid #3a3a45; }
+        .chat-area { width: 70%; display: flex; flex-direction: column; background: #25252d; }
+        
+        .my-id-box { background: #2a2a32; padding: 10px; border-radius: 6px; word-break: break-all; }
+        .messages { flex-grow: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+        .msg { padding: 10px 14px; border-radius: 8px; max-width: 70%; word-break: break-all; }
+        .msg.system { background: #3a3a45; align-self: center; font-size: 12px; color: #aaa; }
+        .msg.me { background: #007bff; align-self: flex-end; }
+        .msg.peer { background: #444; align-self: flex-start; }
+        
+        .input-panel { padding: 15px; background: #1e1e24; display: flex; gap: 10px; align-items: center; }
+        .input-panel input[type="text"] { flex-grow: 1; }
+        .input-panel button { width: auto; margin: 0; }
+        
+        .file-label { background: #6c757d; padding: 10px; border-radius: 4px; cursor: pointer; text-align: center; font-size: 14px; }
+        .file-label:hover { background: #5a6268; }
+        #file-input { display: none; }
+        .download-link { color: #00cbc6; text-decoration: underline; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <div id="auth-overlay">
+        <div class="auth-box">
+            <h3>Доступ ограничен</h3>
+            <input type="password" id="pass-input" placeholder="Введите пароль" onkeypress="if(event.key === 'Enter') checkPassword()">
+            <button onclick="checkPassword()">Войти</button>
+            <p class="error-msg" id="auth-error">Неверный пароль!</p>
+        </div>
+    </div>
+
+    <div id="main-container">
+        <div class="grid">
+            <div class="sidebar">
+                <h3>Ваш ID:</h3>
+                <div class="my-id-box"><span id="my-id">Генерация...</span></div>
+                <hr style="border-color: #3a3a45;">
+                <h3>Подключиться к другу:</h3>
+                <input type="text" id="peer-id-input" placeholder="Вставьте ID друга">
+                <button id="connect-btn" onclick="connectToPeer()">Соединиться</button>
+                <hr style="border-color: #3a3a45;">
+                <label class="file-label" id="file-selector-label" style="display:none;">
+                    📁 Выбрать файл для отправки
+                    <input type="file" id="file-input" onchange="sendFile()">
+                </label>
+            </div>
+            
+            <div class="chat-area">
+                <div class="messages" id="chat-messages">
+                    <div class="msg system">Ожидание авторизации...</div>
+                </div>
+                <div class="input-panel">
+                    <input type="text" id="msg-input" placeholder="Напишите сообщение..." disabled onkeypress="if(event.key === 'Enter') sendMessage()">
+                    <button id="send-btn" onclick="sendMessage()" disabled>Отправить</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // SHA-256 хэш от пароля "4354"
+        const HASHED_PASSWORD = "7e5ae8620fc5ac135465b24fdba97f058fe5c752aa99328d4f97d156ff6fdf9e"; 
+
+        let peer = null;
+        let conn = null;
+
+        // Хэширование введенного текста для проверки
+        async function sha256(string) {
+            const utf8 = new TextEncoder().encode(string);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', utf8);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        // Проверка пароля вручную
+        async function checkPassword() {
+            const input = document.getElementById('pass-input').value;
+            if (!input) return;
+
+            const hashedInput = await sha256(input);
+
+            if (hashedInput === HASHED_PASSWORD) {
+                document.getElementById('auth-overlay').style.display = 'none';
+                document.getElementById('main-container').style.display = 'block';
+                initPeer(); 
+            } else {
+                document.getElementById('auth-error').style.display = 'block';
+            }
+        }
+
+        // Инициализация сети PeerJS
+        function initPeer() {
+            if (peer) return; 
+            peer = new Peer();
+
+            peer.on('open', (id) => {
+                document.getElementById('my-id').innerText = id;
+                logMessage('Система', 'Вы подключились к сети. Передайте свой ID другу.');
+            });
+
+            peer.on('connection', (incomingConn) => {
+                if (conn) {
+                    incomingConn.close();
+                    return;
+                }
+                conn = incomingConn;
+                setupConnectionHandlers();
+            });
+
+            peer.on('error', (err) => {
+                console.error(err);
+                logMessage('Ошибка', 'Произошла ошибка сети.');
+            });
+        }
+
+        // Подключение по ID
+        function connectToPeer() {
+            const peerId = document.getElementById('peer-id-input').value.trim();
+            if (!peerId) return alert('Введите ID!');
+            
+            logMessage('Система', 'Попытка соединения...');
+            conn = peer.connect(peerId);
+            setupConnectionHandlers();
+        }
+
+        // Обработка открытого канала связи
+        function setupConnectionHandlers() {
+            conn.on('open', () => {
+                logMessage('Система', 'Соединение установлено напрямую (P2P)!');
+                document.getElementById('msg-input').disabled = false;
+                document.getElementById('send-btn').disabled = false;
+                document.getElementById('file-selector-label').style.display = 'block';
+                document.getElementById('connect-btn').disabled = true;
+            });
+
+            conn.on('data', (data) => {
+                if (data.type === 'chat') {
+                    logMessage('Друг', data.text, 'peer');
+                } else if (data.type === 'file') {
+                    const blob = new Blob([data.fileData], { type: data.fileType });
+                    const url = URL.createObjectURL(blob);
+                    const linkHtml = `<span class="download-link" onclick="downloadFile('${url}', '${data.fileName}')">Скачать ${data.fileName} (${(data.fileSize/1024/1024).toFixed(2)} MB)</span>`;
+                    logMessage('Друг', `Прислал файл: ${linkHtml}`, 'peer');
+                }
+            });
+
+            conn.on('close', () => {
+                logMessage('Система', 'Соединение закрыто.');
+                resetInterface();
+            });
+        }
+
+        // Отправка сообщений в чат
+        function sendMessage() {
+            const input = document.getElementById('msg-input');
+            const text = input.value.trim();
+            if (!text || !conn) return;
+
+            conn.send({ type: 'chat', text: text });
+            logMessage('Вы', text, 'me');
+            input.value = '';
+        }
+
+        // Отправка файлов напрямую в браузер
+        function sendFile() {
+            const fileInput = document.getElementById('file-input');
+            const file = fileInput.files[0];
+            if (!file || !conn) return;
+
+            logMessage('Система', `Отправка файла "${file.name}"...`);
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                conn.send({
+                    type: 'file',
+                    fileData: event.target.result,
+                    fileName: file.name,
+                    fileType: file.type,
+                    fileSize: file.size
+                });
+                logMessage('Вы', `Отправлен файл: ${file.name}`, 'me');
+                fileInput.value = '';
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        // Скачивание полученного файла
+        function downloadFile(url, filename) {
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+        }
+
+        // Логирование в окно чата
+        function logMessage(sender, text, type = 'system') {
+            const chat = document.getElementById('chat-messages');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `msg ${type}`;
+            msgDiv.innerHTML = `<strong>${sender}:</strong> ${text}`;
+            chat.appendChild(msgDiv);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        // Сброс при отключении
+        function resetInterface() {
+            conn = null;
+            document.getElementById('msg-input').disabled = true;
+            document.getElementById('send-btn').disabled = true;
+            document.getElementById('file-selector-label').style.display = 'none';
+            document.getElementById('connect-btn').disabled = false;
+        }
+    </script>
+</body>
+</html>
