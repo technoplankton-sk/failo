@@ -71,7 +71,7 @@
                 <div class="status-box"><strong id="username-display">...</strong></div>
                 <hr style="border-color: #3a3a45;">
                 <h3>Статус сети:</h3>
-                <div class="status-box" id="network-status">Поиск собеседника в базе...</div>
+                <div class="status-box" id="network-status">Инициализация...</div>
                 <hr style="border-color: #3a3a45;">
                 <label class="file-label" id="file-selector-label" style="display:none;">
                     📁 Выбрать файл для отправки
@@ -112,10 +112,9 @@
         let myRole = '';    
         let peerRole = '';  
 
-        // Переменные для сборки файлов из чанков
         let receivedChunks = [];
         let incomingFileMeta = null;
-        const CHUNK_SIZE = 16384; // 16 KB куски для стабильности WebRTC
+        const CHUNK_SIZE = 16384; 
 
         async function sha256(string) {
             const utf8 = new TextEncoder().encode(string);
@@ -160,11 +159,18 @@
                 });
 
                 db.ref('online/' + myRole).onDisconnect().remove();
-                listenForPeer();
+                
+                // РАЗДЕЛЕНИЕ ЛОГИКИ: Звонит только Дима
+                if (myRole === 'dima') {
+                    listenForPeer();
+                } else {
+                    document.getElementById('network-status').innerText = 'Ожидаем подключения Димы...';
+                }
             });
 
+            // Прием входящего соединения (отработает у Валеры)
             peer.on('connection', (incomingConn) => {
-                if (conn) return;
+                if (conn) return; 
                 conn = incomingConn;
                 setupConnectionHandlers();
             });
@@ -178,7 +184,7 @@
                     conn = peer.connect(data.id);
                     setupConnectionHandlers();
                 } else if (!data) {
-                    document.getElementById('network-status').innerText = 'Ожидаем подключение друга...';
+                    document.getElementById('network-status').innerText = 'Ожидаем подключения Валеры...';
                 }
             });
         }
@@ -195,21 +201,16 @@
                 if (data.type === 'chat') {
                     logMessage('Друг', data.text, 'peer');
                 } else if (data.type === 'file-start') {
-                    // Инициализация приема нового файла
                     receivedChunks = [];
                     incomingFileMeta = data;
                     logMessage('Система', `Принимаем файл "${data.fileName}"...`);
                 } else if (data.type === 'file-chunk') {
-                    // Собираем куски в массив
                     receivedChunks.push(data.chunkData);
                 } else if (data.type === 'file-end') {
-                    // Склеиваем файл обратно и выводим ссылку на скачивание
                     const blob = new Blob(receivedChunks, { type: incomingFileMeta.fileType });
                     const url = URL.createObjectURL(blob);
                     const linkHtml = `<span class="download-link" onclick="downloadFile('${url}', '${incomingFileMeta.fileName}')">Скачать ${incomingFileMeta.fileName} (${(incomingFileMeta.fileSize/1024/1024).toFixed(2)} MB)</span>`;
                     logMessage('Друг', `Прислал файл: ${linkHtml}`, 'peer');
-                    
-                    // Сброс буфера приемника
                     receivedChunks = [];
                     incomingFileMeta = null;
                 }
@@ -231,20 +232,18 @@
             input.value = '';
         }
 
-        // Потоковая отправка файлов чанками (кусочками)
         function sendFile() {
             const fileInput = document.getElementById('file-input');
             const file = fileInput.files[0];
             if (!file || !conn) return;
 
-            logMessage('Система', `Отправка файла "${file.name}"... Ожидайте окончания загрузки.`);
+            logMessage('Система', `Отправка файла "${file.name}"...`);
 
             const reader = new FileReader();
             reader.onload = function(event) {
                 const buffer = event.target.result;
                 let offset = 0;
 
-                // Отправляем сигнал о старте файла с метаданными
                 conn.send({
                     type: 'file-start',
                     fileName: file.name,
@@ -252,21 +251,13 @@
                     fileSize: file.size
                 });
 
-                // Функция последовательной нарезки и отправки
                 function sendNextChunk() {
                     if (offset < buffer.byteLength) {
                         const chunk = buffer.slice(offset, offset + CHUNK_SIZE);
                         offset += CHUNK_SIZE;
-                        
-                        conn.send({
-                            type: 'file-chunk',
-                            chunkData: chunk
-                        });
-                        
-                        // Микротаймаут в 1мс, чтобы не перегружать сетевой стек браузера
+                        conn.send({ type: 'file-chunk', chunkData: chunk });
                         setTimeout(sendNextChunk, 1);
                     } else {
-                        // Файл отправлен полностью
                         conn.send({ type: 'file-end' });
                         logMessage('Вы', `Успешно отправлен файл: ${file.name}`, 'me');
                         fileInput.value = '';
@@ -298,7 +289,11 @@
             document.getElementById('msg-input').disabled = true;
             document.getElementById('send-btn').disabled = true;
             document.getElementById('file-selector-label').style.display = 'none';
-            document.getElementById('network-status').innerText = 'Соединение разорвано. Ожидание...';
+            if (myRole === 'dima') {
+                document.getElementById('network-status').innerText = 'Соединение разорвано. Ожидаем Валеру...';
+            } else {
+                document.getElementById('network-status').innerText = 'Соединение разорвано. Ожидаем Диму...';
+            }
         }
     </script>
 </body>
