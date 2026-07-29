@@ -14,6 +14,7 @@ function startServer(userDataPath) {
     app.use(express.json());
     app.use(express.static(__dirname));
 
+    // Вычисляем путь к папке загрузок
     const UPLOAD_DIR = userDataPath 
         ? path.join(userDataPath, 'EliteMessengerUploads')
         : path.join(__dirname, 'uploads');
