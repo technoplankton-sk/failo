@@ -14,7 +14,7 @@ function startServer(userDataPath) {
     app.use(express.json());
     app.use(express.static(__dirname));
 
-    // Вычисляем путь к папке загрузок вне app.asar, используя переданный userDataPath
+    // Вычисляем путь к папке загрузок
     const UPLOAD_DIR = userDataPath 
         ? path.join(userDataPath, 'EliteMessengerUploads')
         : path.join(__dirname, 'uploads');
@@ -129,10 +129,18 @@ function startServer(userDataPath) {
         });
     });
 
-    const PORT = 3000;
+    // Использование порта из Render (process.env.PORT) или по умолчанию 3000
+    const PORT = process.env.PORT || 3000;
     server.listen(PORT, '0.0.0.0', () => {
-        console.log(`>>> Сервер запущен на http://localhost:${PORT}`);
+        console.log(`>>> Сервер запущен на порту ${PORT}`);
     });
+
+    return server;
+}
+
+// Запускаем сервер автоматически, если файл вызывают напрямую (как на Render)
+if (require.main === module) {
+    startServer();
 }
 
 module.exports = startServer;
