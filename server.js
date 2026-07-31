@@ -26,25 +26,31 @@ function startServer(userDataPath) {
 
     const storage = multer.diskStorage({
         destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-        filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+        filename: (req, file, cb) => {
+            // Исправляем кодировку кириллицы в имени файла
+            const correctName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+            cb(null, Date.now() + '-' + correctName);
+        }
     });
     const upload = multer({ storage });
 
-    // Принимаем массив файлов (до 10 файлов за раз)
     app.post('/upload', upload.array('files', 10), (req, res) => {
         if (!req.files || req.files.length === 0) return res.status(400).send('Файлы не загружены');
         
-        const fileData = req.files.map(file => ({
-            fileUrl: `/uploads/${file.filename}`,
-            fileName: file.originalname,
-            fileSize: file.size
-        }));
+        const fileData = req.files.map(file => {
+            const correctOriginalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+            return {
+                fileUrl: `/uploads/${file.filename}`,
+                fileName: correctOriginalName,
+                fileSize: file.size
+            };
+        });
 
         res.json({ files: fileData });
     });
 
     let messages = [];
-    let users = {}; // { socketId: { username, status: 'online'|'offline' } }
+    let users = {};
 
     function broadcastUserList() {
         io.emit('user_list', Object.values(users));
@@ -68,7 +74,7 @@ function startServer(userDataPath) {
                 sender: senderName,
                 senderId: socket.id,
                 text: data.text || '',
-                files: data.files || [], // Массив файлов
+                files: data.files || [],
                 timestamp: data.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                 status: 'sent',
                 reactions: {}
@@ -88,12 +94,10 @@ function startServer(userDataPath) {
 
             const userIdx = msg.reactions[emoji].indexOf(username);
             
-            // Если этот пользователь уже ставил этот эмодзи — удаляем его реакцию
             if (userIdx !== -1) {
                 msg.reactions[emoji].splice(userIdx, 1);
                 if (msg.reactions[emoji].length === 0) delete msg.reactions[emoji];
             } else {
-                // Если не ставил — добавляем
                 msg.reactions[emoji].push(username);
             }
 
@@ -126,7 +130,7 @@ function startServer(userDataPath) {
         socket.on('edit_message', ({ msgId, newText }) => {
             const msg = messages.find(m => m.id === msgId);
             const userObj = users[socket.id];
-            // Редактировать может только автор сообщения
+            // Редактировать разрешено автору
             if (msg && userObj && msg.sender === userObj.username) {
                 msg.text = newText;
                 msg.isEdited = true;
@@ -147,7 +151,6 @@ function startServer(userDataPath) {
             if (users[socket.id]) {
                 users[socket.id].status = 'offline';
                 broadcastUserList();
-                // Удаляем из списка через 10 секунд отключения
                 setTimeout(() => {
                     delete users[socket.id];
                     broadcastUserList();
