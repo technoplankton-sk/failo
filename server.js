@@ -27,7 +27,6 @@ function startServer(userDataPath) {
     const storage = multer.diskStorage({
         destination: (req, file, cb) => cb(null, UPLOAD_DIR),
         filename: (req, file, cb) => {
-            // Исправляем кодировку кириллицы в имени файла
             const correctName = Buffer.from(file.originalname, 'latin1').toString('utf8');
             cb(null, Date.now() + '-' + correctName);
         }
@@ -42,7 +41,8 @@ function startServer(userDataPath) {
             return {
                 fileUrl: `/uploads/${file.filename}`,
                 fileName: correctOriginalName,
-                fileSize: file.size
+                fileSize: file.size,
+                fileType: file.mimetype
             };
         });
 
@@ -50,19 +50,31 @@ function startServer(userDataPath) {
     });
 
     let messages = [];
-    let users = {};
+    let users = {}; 
 
     function broadcastUserList() {
-        io.emit('user_list', Object.values(users));
+        // Если у юзера включен Ghost Mode, он виден как offline для остальных
+        const publicUsers = Object.values(users).map(u => ({
+            username: u.username,
+            status: u.isGhost ? 'offline' : u.status
+        }));
+        io.emit('user_list', publicUsers);
     }
 
     io.on('connection', (socket) => {
         console.log(`[+] Подключение: ${socket.id}`);
 
-        socket.on('user_join', (username) => {
-            users[socket.id] = { username, status: 'online' };
+        socket.on('user_join', ({ username, isGhost }) => {
+            users[socket.id] = { username, status: 'online', isGhost: !!isGhost };
             broadcastUserList();
             socket.emit('message_history', messages);
+        });
+
+        socket.on('toggle_ghost', (isGhost) => {
+            if (users[socket.id]) {
+                users[socket.id].isGhost = isGhost;
+                broadcastUserList();
+            }
         });
 
         socket.on('send_message', (data) => {
@@ -74,6 +86,8 @@ function startServer(userDataPath) {
                 sender: senderName,
                 senderId: socket.id,
                 text: data.text || '',
+                isEncrypted: !!data.isEncrypted,
+                replyTo: data.replyTo || null,
                 files: data.files || [],
                 timestamp: data.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                 status: 'sent',
@@ -113,6 +127,10 @@ function startServer(userDataPath) {
         });
 
         socket.on('ack_read', ({ msgId }) => {
+            const userObj = users[socket.id];
+            // В Ghost Mode синие галочки чтения не отправляются!
+            if (userObj && userObj.isGhost) return;
+
             const msg = messages.find(m => m.id === msgId);
             if (msg) {
                 msg.status = 'read';
@@ -122,7 +140,7 @@ function startServer(userDataPath) {
 
         socket.on('typing', (isTyping) => {
             const userObj = users[socket.id];
-            if (userObj) {
+            if (userObj && !userObj.isGhost) {
                 socket.broadcast.emit('user_typing', { username: userObj.username, isTyping });
             }
         });
@@ -130,7 +148,6 @@ function startServer(userDataPath) {
         socket.on('edit_message', ({ msgId, newText }) => {
             const msg = messages.find(m => m.id === msgId);
             const userObj = users[socket.id];
-            // Редактировать разрешено автору
             if (msg && userObj && msg.sender === userObj.username) {
                 msg.text = newText;
                 msg.isEdited = true;
