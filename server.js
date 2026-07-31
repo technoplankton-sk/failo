@@ -14,7 +14,6 @@ function startServer(userDataPath) {
     app.use(express.json());
     app.use(express.static(__dirname));
 
-    // Вычисляем путь к папке загрузок
     const UPLOAD_DIR = userDataPath 
         ? path.join(userDataPath, 'EliteMessengerUploads')
         : path.join(__dirname, 'uploads');
@@ -31,35 +30,46 @@ function startServer(userDataPath) {
     });
     const upload = multer({ storage });
 
-    app.post('/upload', upload.single('file'), (req, res) => {
-        if (!req.file) return res.status(400).send('Файл не загружен');
-        res.json({
-            fileUrl: `/uploads/${req.file.filename}`,
-            fileName: req.file.originalname,
-            fileSize: req.file.size
-        });
+    // Принимаем массив файлов (до 10 файлов за раз)
+    app.post('/upload', upload.array('files', 10), (req, res) => {
+        if (!req.files || req.files.length === 0) return res.status(400).send('Файлы не загружены');
+        
+        const fileData = req.files.map(file => ({
+            fileUrl: `/uploads/${file.filename}`,
+            fileName: file.originalname,
+            fileSize: file.size
+        }));
+
+        res.json({ files: fileData });
     });
 
     let messages = [];
-    let users = {};
+    let users = {}; // { socketId: { username, status: 'online'|'offline' } }
+
+    function broadcastUserList() {
+        io.emit('user_list', Object.values(users));
+    }
 
     io.on('connection', (socket) => {
         console.log(`[+] Подключение: ${socket.id}`);
 
         socket.on('user_join', (username) => {
-            users[socket.id] = username;
-            io.emit('user_list', Object.values(users));
+            users[socket.id] = { username, status: 'online' };
+            broadcastUserList();
             socket.emit('message_history', messages);
         });
 
         socket.on('send_message', (data) => {
+            const userObj = users[socket.id];
+            const senderName = userObj ? userObj.username : 'Аноним';
+
             const msg = {
                 id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-                sender: users[socket.id] || 'Аноним',
+                sender: senderName,
                 senderId: socket.id,
                 text: data.text || '',
-                file: data.file || null,
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                files: data.files || [], // Массив файлов
+                timestamp: data.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                 status: 'sent',
                 reactions: {}
             };
@@ -69,26 +79,30 @@ function startServer(userDataPath) {
 
         socket.on('add_reaction', ({ msgId, emoji }) => {
             const msg = messages.find(m => m.id === msgId);
-            const username = users[socket.id];
-            if (msg && username) {
-                if (!msg.reactions) msg.reactions = {};
-                if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
-                
-                const userIdx = msg.reactions[emoji].indexOf(username);
-                if (userIdx !== -1) {
-                    msg.reactions[emoji].splice(userIdx, 1);
-                    if (msg.reactions[emoji].length === 0) delete msg.reactions[emoji];
-                } else {
-                    msg.reactions[emoji].push(username);
-                }
+            const userObj = users[socket.id];
+            if (!msg || !userObj) return;
 
-                io.emit('reaction_updated', { msgId, reactions: msg.reactions });
+            const username = userObj.username;
+            if (!msg.reactions) msg.reactions = {};
+            if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
+
+            const userIdx = msg.reactions[emoji].indexOf(username);
+            
+            // Если этот пользователь уже ставил этот эмодзи — удаляем его реакцию
+            if (userIdx !== -1) {
+                msg.reactions[emoji].splice(userIdx, 1);
+                if (msg.reactions[emoji].length === 0) delete msg.reactions[emoji];
+            } else {
+                // Если не ставил — добавляем
+                msg.reactions[emoji].push(username);
             }
+
+            io.emit('reaction_updated', { msgId, reactions: msg.reactions });
         });
 
         socket.on('ack_delivery', ({ msgId }) => {
             const msg = messages.find(m => m.id === msgId);
-            if (msg) {
+            if (msg && msg.status === 'sent') {
                 msg.status = 'delivered';
                 io.emit('message_status_update', { msgId, status: 'delivered' });
             }
@@ -103,12 +117,17 @@ function startServer(userDataPath) {
         });
 
         socket.on('typing', (isTyping) => {
-            socket.broadcast.emit('user_typing', { username: users[socket.id], isTyping });
+            const userObj = users[socket.id];
+            if (userObj) {
+                socket.broadcast.emit('user_typing', { username: userObj.username, isTyping });
+            }
         });
 
         socket.on('edit_message', ({ msgId, newText }) => {
             const msg = messages.find(m => m.id === msgId);
-            if (msg && msg.senderId === socket.id) {
+            const userObj = users[socket.id];
+            // Редактировать может только автор сообщения
+            if (msg && userObj && msg.sender === userObj.username) {
                 msg.text = newText;
                 msg.isEdited = true;
                 io.emit('message_edited', { msgId, newText, isEdited: true });
@@ -117,15 +136,23 @@ function startServer(userDataPath) {
 
         socket.on('delete_message', ({ msgId, forEveryone }) => {
             const msgIndex = messages.findIndex(m => m.id === msgId);
-            if (msgIndex !== -1 && forEveryone) {
+            const userObj = users[socket.id];
+            if (msgIndex !== -1 && userObj && messages[msgIndex].sender === userObj.username && forEveryone) {
                 messages.splice(msgIndex, 1);
                 io.emit('message_deleted', { msgId });
             }
         });
 
         socket.on('disconnect', () => {
-            delete users[socket.id];
-            io.emit('user_list', Object.values(users));
+            if (users[socket.id]) {
+                users[socket.id].status = 'offline';
+                broadcastUserList();
+                // Удаляем из списка через 10 секунд отключения
+                setTimeout(() => {
+                    delete users[socket.id];
+                    broadcastUserList();
+                }, 10000);
+            }
         });
     });
 
