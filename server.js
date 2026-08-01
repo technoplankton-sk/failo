@@ -3,7 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const multer = require('multer');
-const path = require('path');
+const path = path = require('path');
 const fs = require('fs');
 
 const app = express();
@@ -17,12 +17,14 @@ if (!fs.existsSync(uploadDir)) {
 }
 app.use('/uploads', express.static(uploadDir));
 
-// Настройка Multer для загрузки файлов
+// Настройка Multer с фиксом кириллицы (русских букв)
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadDir),
     filename: (req, file, cb) => {
+        // Декодируем имя файла из latin1 в utf-8 для корректной работы с русскими буквами
+        const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, uniqueSuffix + '-' + file.originalname);
+        cb(null, uniqueSuffix + '-' + originalName);
     }
 });
 const upload = multer({ storage });
@@ -43,11 +45,14 @@ app.post('/upload', upload.array('files'), (req, res) => {
     if (!req.files || req.files.length === 0) {
         return res.status(400).json({ error: 'Файлы не загружены' });
     }
-    const filesData = req.files.map(file => ({
-        fileName: file.originalname,
-        fileUrl: `/uploads/${file.filename}`,
-        fileType: file.mimetype
-    }));
+    const filesData = req.files.map(file => {
+        const decodedName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+        return {
+            fileName: decodedName,
+            fileUrl: `/uploads/${file.filename}`,
+            fileType: file.mimetype
+        };
+    });
     res.json({ files: filesData });
 });
 
@@ -62,9 +67,9 @@ io.on('connection', (socket) => {
             status: isGhost ? 'offline' : 'online' 
         };
 
-        // Рассылаем список юзеров
+        // Рассылаем обновленный список контактов в сети
         io.emit('user_list', Object.values(onlineUsers));
-        // Отправляем историю сообщений
+        // Отправляем подключенному пользователю историю сообщений
         socket.emit('message_history', messageHistory);
     });
 
@@ -100,12 +105,12 @@ io.on('connection', (socket) => {
     });
 
     // ================= WebRTC & Звонки & Молоточек =================
-    // Сервер пересылает сигналы звонков, WebRTC офферы и удары молоточком
+    // Сервер пересылает сигналы звонков, WebRTC офферы и удары молоточком всем клиентам
     socket.on('webrtc_signal', (data) => {
         io.emit('webrtc_signal', data);
     });
 
-    // Подтверждение доставки/прочтения
+    // Подтверждение доставки и прочтения сообщений
     socket.on('ack_delivery', ({ msgId }) => {
         const msg = messageHistory.find(m => m.id === msgId);
         if (msg && msg.status !== 'read') {
@@ -122,7 +127,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Реакции (смайлики)
+    // Добавление и снятие реакций (эмодзи)
     socket.on('add_reaction', ({ msgId, emoji }) => {
         const user = onlineUsers[socket.id];
         if (!user) return;
@@ -133,16 +138,16 @@ io.on('connection', (socket) => {
             
             const idx = msg.reactions[emoji].indexOf(user.username);
             if (idx > -1) {
-                msg.reactions[emoji].splice(idx, 1); // Повторный клик — убираем реакцию
+                msg.reactions[emoji].splice(idx, 1);
             } else {
-                msg.reactions[emoji].push(user.username); // Добавляем реакцию
+                msg.reactions[emoji].push(user.username);
             }
 
             io.emit('reaction_updated', { msgId, reactions: msg.reactions });
         }
     });
 
-    // Статус "Печатает..."
+    // Индикатор "Печатает..."
     socket.on('typing', (isTyping) => {
         const user = onlineUsers[socket.id];
         if (user) {
@@ -150,7 +155,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Редактирование сообщения
+    // Редактирование текста сообщения
     socket.on('edit_message', ({ msgId, newText }) => {
         const msg = messageHistory.find(m => m.id === msgId);
         if (msg) {
@@ -159,7 +164,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Удаление сообщения
+    // Удаление сообщения для всех
     socket.on('delete_message', ({ msgId }) => {
         messageHistory = messageHistory.filter(m => m.id !== msgId);
         io.emit('message_deleted', { msgId });
