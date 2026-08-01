@@ -1,191 +1,179 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-function startServer(userDataPath) {
-    const app = express();
-    const server = http.createServer(app);
-    const io = new Server(server, { maxHttpBufferSize: 1e8 });
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-    app.use(require('cors')());
-    app.use(express.json());
-    app.use(express.static(__dirname));
+// Создаем папку uploads, если её нет
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir);
+}
+app.use('/uploads', express.static(uploadDir));
 
-    const UPLOAD_DIR = userDataPath 
-        ? path.join(userDataPath, 'EliteMessengerUploads')
-        : path.join(__dirname, 'uploads');
-
-    if (!fs.existsSync(UPLOAD_DIR)) {
-        fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+// Настройка Multer для загрузки файлов
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadDir),
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + '-' + file.originalname);
     }
+});
+const upload = multer({ storage });
 
-    app.use('/uploads', express.static(UPLOAD_DIR));
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
 
-    const storage = multer.diskStorage({
-        destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-        filename: (req, file, cb) => {
-            const correctName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-            cb(null, Date.now() + '-' + correctName);
+let onlineUsers = {}; // { socketId: { username, status } }
+let messageHistory = [];
+
+// Эндпоинт для загрузки файлов в облако
+app.post('/upload', upload.array('files'), (req, res) => {
+    if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: 'Файлы не загружены' });
+    }
+    const filesData = req.files.map(file => ({
+        fileName: file.originalname,
+        fileUrl: `/uploads/${file.filename}`,
+        fileType: file.mimetype
+    }));
+    res.json({ files: filesData });
+});
+
+io.on('connection', (socket) => {
+    console.log('Новое подключение:', socket.id);
+
+    // Вход пользователя в сеть
+    socket.on('user_join', ({ username, isGhost }) => {
+        const cleanName = username.trim();
+        onlineUsers[socket.id] = { 
+            username: cleanName, 
+            status: isGhost ? 'offline' : 'online' 
+        };
+
+        // Рассылаем список юзеров
+        io.emit('user_list', Object.values(onlineUsers));
+        // Отправляем историю сообщений
+        socket.emit('message_history', messageHistory);
+    });
+
+    // Переключение Ghost Mode
+    socket.on('toggle_ghost', (isGhost) => {
+        if (onlineUsers[socket.id]) {
+            onlineUsers[socket.id].status = isGhost ? 'offline' : 'online';
+            io.emit('user_list', Object.values(onlineUsers));
         }
     });
-    const upload = multer({ storage });
 
-    app.post('/upload', upload.array('files', 10), (req, res) => {
-        if (!req.files || req.files.length === 0) return res.status(400).send('Файлы не загружены');
-        
-        const fileData = req.files.map(file => {
-            const correctOriginalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-            return {
-                fileUrl: `/uploads/${file.filename}`,
-                fileName: correctOriginalName,
-                fileSize: file.size,
-                fileType: file.mimetype
-            };
-        });
+    // Отправка нового сообщения
+    socket.on('send_message', (data) => {
+        const senderInfo = onlineUsers[socket.id];
+        const senderName = senderInfo ? senderInfo.username : 'Аноним';
 
-        res.json({ files: fileData });
+        const newMsg = {
+            id: 'msg-' + Date.now() + '-' + Math.round(Math.random() * 1000),
+            sender: senderName,
+            text: data.text || '',
+            isEncrypted: data.isEncrypted || false,
+            replyTo: data.replyTo || null,
+            files: data.files || [],
+            timestamp: data.timestamp,
+            reactions: {},
+            status: 'sent'
+        };
+
+        messageHistory.push(newMsg);
+        if (messageHistory.length > 200) messageHistory.shift(); // Храним последние 200 сообщений
+
+        io.emit('new_message', newMsg);
     });
 
-    let messages = [];
-    let users = {}; 
+    // ================= WebRTC & Звонки & Молоточек =================
+    // Сервер пересылает сигналы звонков, WebRTC офферы и удары молоточком
+    socket.on('webrtc_signal', (data) => {
+        io.emit('webrtc_signal', data);
+    });
 
-    function broadcastUserList() {
-        // Если у юзера включен Ghost Mode, он виден как offline для остальных
-        const publicUsers = Object.values(users).map(u => ({
-            username: u.username,
-            status: u.isGhost ? 'offline' : u.status
-        }));
-        io.emit('user_list', publicUsers);
-    }
+    // Подтверждение доставки/прочтения
+    socket.on('ack_delivery', ({ msgId }) => {
+        const msg = messageHistory.find(m => m.id === msgId);
+        if (msg && msg.status !== 'read') {
+            msg.status = 'delivered';
+            io.emit('message_status_update', { msgId, status: 'delivered' });
+        }
+    });
 
-    io.on('connection', (socket) => {
-        console.log(`[+] Подключение: ${socket.id}`);
+    socket.on('ack_read', ({ msgId }) => {
+        const msg = messageHistory.find(m => m.id === msgId);
+        if (msg) {
+            msg.status = 'read';
+            io.emit('message_status_update', { msgId, status: 'read' });
+        }
+    });
 
-        socket.on('user_join', ({ username, isGhost }) => {
-            users[socket.id] = { username, status: 'online', isGhost: !!isGhost };
-            broadcastUserList();
-            socket.emit('message_history', messages);
-        });
+    // Реакции (смайлики)
+    socket.on('add_reaction', ({ msgId, emoji }) => {
+        const user = onlineUsers[socket.id];
+        if (!user) return;
 
-        socket.on('toggle_ghost', (isGhost) => {
-            if (users[socket.id]) {
-                users[socket.id].isGhost = isGhost;
-                broadcastUserList();
-            }
-        });
-
-        socket.on('send_message', (data) => {
-            const userObj = users[socket.id];
-            const senderName = userObj ? userObj.username : 'Аноним';
-
-            const msg = {
-                id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-                sender: senderName,
-                senderId: socket.id,
-                text: data.text || '',
-                isEncrypted: !!data.isEncrypted,
-                replyTo: data.replyTo || null,
-                files: data.files || [],
-                timestamp: data.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                status: 'sent',
-                reactions: {}
-            };
-            messages.push(msg);
-            io.emit('new_message', msg);
-        });
-
-        socket.on('add_reaction', ({ msgId, emoji }) => {
-            const msg = messages.find(m => m.id === msgId);
-            const userObj = users[socket.id];
-            if (!msg || !userObj) return;
-
-            const username = userObj.username;
-            if (!msg.reactions) msg.reactions = {};
+        const msg = messageHistory.find(m => m.id === msgId);
+        if (msg) {
             if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
-
-            const userIdx = msg.reactions[emoji].indexOf(username);
             
-            if (userIdx !== -1) {
-                msg.reactions[emoji].splice(userIdx, 1);
-                if (msg.reactions[emoji].length === 0) delete msg.reactions[emoji];
+            const idx = msg.reactions[emoji].indexOf(user.username);
+            if (idx > -1) {
+                msg.reactions[emoji].splice(idx, 1); // Повторный клик — убираем реакцию
             } else {
-                msg.reactions[emoji].push(username);
+                msg.reactions[emoji].push(user.username); // Добавляем реакцию
             }
 
             io.emit('reaction_updated', { msgId, reactions: msg.reactions });
-        });
-
-        socket.on('ack_delivery', ({ msgId }) => {
-            const msg = messages.find(m => m.id === msgId);
-            if (msg && msg.status === 'sent') {
-                msg.status = 'delivered';
-                io.emit('message_status_update', { msgId, status: 'delivered' });
-            }
-        });
-
-        socket.on('ack_read', ({ msgId }) => {
-            const userObj = users[socket.id];
-            // В Ghost Mode синие галочки чтения не отправляются!
-            if (userObj && userObj.isGhost) return;
-
-            const msg = messages.find(m => m.id === msgId);
-            if (msg) {
-                msg.status = 'read';
-                io.emit('message_status_update', { msgId, status: 'read' });
-            }
-        });
-
-        socket.on('typing', (isTyping) => {
-            const userObj = users[socket.id];
-            if (userObj && !userObj.isGhost) {
-                socket.broadcast.emit('user_typing', { username: userObj.username, isTyping });
-            }
-        });
-
-        socket.on('edit_message', ({ msgId, newText }) => {
-            const msg = messages.find(m => m.id === msgId);
-            const userObj = users[socket.id];
-            if (msg && userObj && msg.sender === userObj.username) {
-                msg.text = newText;
-                msg.isEdited = true;
-                io.emit('message_edited', { msgId, newText, isEdited: true });
-            }
-        });
-
-        socket.on('delete_message', ({ msgId, forEveryone }) => {
-            const msgIndex = messages.findIndex(m => m.id === msgId);
-            const userObj = users[socket.id];
-            if (msgIndex !== -1 && userObj && messages[msgIndex].sender === userObj.username && forEveryone) {
-                messages.splice(msgIndex, 1);
-                io.emit('message_deleted', { msgId });
-            }
-        });
-
-        socket.on('disconnect', () => {
-            if (users[socket.id]) {
-                users[socket.id].status = 'offline';
-                broadcastUserList();
-                setTimeout(() => {
-                    delete users[socket.id];
-                    broadcastUserList();
-                }, 10000);
-            }
-        });
+        }
     });
 
-    const PORT = process.env.PORT || 3000;
-    server.listen(PORT, '0.0.0.0', () => {
-        console.log(`>>> Сервер запущен на порту ${PORT}`);
+    // Статус "Печатает..."
+    socket.on('typing', (isTyping) => {
+        const user = onlineUsers[socket.id];
+        if (user) {
+            socket.broadcast.emit('user_typing', { username: user.username, isTyping });
+        }
     });
 
-    return server;
-}
+    // Редактирование сообщения
+    socket.on('edit_message', ({ msgId, newText }) => {
+        const msg = messageHistory.find(m => m.id === msgId);
+        if (msg) {
+            msg.text = newText;
+            io.emit('message_edited', { msgId, newText });
+        }
+    });
 
-if (require.main === module) {
-    startServer();
-}
+    // Удаление сообщения
+    socket.on('delete_message', ({ msgId }) => {
+        messageHistory = messageHistory.filter(m => m.id !== msgId);
+        io.emit('message_deleted', { msgId });
+    });
 
-module.exports = startServer;
+    // Отключение пользователя
+    socket.on('disconnect', () => {
+        delete onlineUsers[socket.id];
+        io.emit('user_list', Object.values(onlineUsers));
+        console.log('Отключился:', socket.id);
+    });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Сервер запущен на порту ${PORT}`);
+});
