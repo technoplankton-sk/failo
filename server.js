@@ -24,7 +24,9 @@ if (fs.existsSync(usersFile)) {
 }
 
 function saveUsers() {
-    fs.writeFileSync(usersFile, JSON.stringify(registeredUsers, null, 2), 'utf8');
+    try {
+        fs.writeFileSync(usersFile, JSON.stringify(registeredUsers, null, 2), 'utf8');
+    } catch(e) {}
 }
 
 const storage = multer.diskStorage({
@@ -64,23 +66,28 @@ io.on('connection', (socket) => {
     // Регистрация нового пользователя
     socket.on('register_user', ({ username, password }) => {
         const cleanName = username.trim();
-        if (registeredUsers[cleanName.toLowerCase()]) {
+        const userKey = cleanName.toLowerCase();
+        
+        if (registeredUsers[userKey]) {
             socket.emit('register_response', { success: false, message: 'Это имя уже занято!' });
         } else {
-            registeredUsers[cleanName.toLowerCase()] = { username: cleanName, password: password };
+            registeredUsers[userKey] = { username: cleanName, password: password };
             saveUsers();
             socket.emit('register_response', { success: true });
         }
     });
 
-    // Авторизация
+    // Авторизация с автовосстановлением аккаунта после сброса контейнера Render
     socket.on('user_login', ({ username, password, isGhost }) => {
         const cleanName = username.trim();
-        const userInDb = registeredUsers[cleanName.toLowerCase()];
+        const userKey = cleanName.toLowerCase();
+        let userInDb = registeredUsers[userKey];
 
+        // Если файл был стерт при сбросе контейнера Render, восстанавливаем учетную запись по переданным данным
         if (!userInDb) {
-            socket.emit('login_response', { success: false, message: 'Пользователь не найден!' });
-            return;
+            registeredUsers[userKey] = { username: cleanName, password: password };
+            saveUsers();
+            userInDb = registeredUsers[userKey];
         }
 
         if (userInDb.password !== password) {
@@ -91,7 +98,7 @@ io.on('connection', (socket) => {
         onlineUsers[socket.id] = { username: cleanName, status: isGhost ? 'offline' : 'online' };
         socket.emit('login_response', { success: true });
 
-        // Отправляем список всех зарегистрированных пользователей
+        // Отправляем список зарегистрированных пользователей
         const allUsersList = Object.values(registeredUsers).map(u => {
             const isOnline = Object.values(onlineUsers).some(o => o.username.toLowerCase() === u.username.toLowerCase() && o.status === 'online');
             return { username: u.username, status: isOnline ? 'online' : 'offline' };
