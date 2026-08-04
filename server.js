@@ -10,18 +10,26 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Создаем папку uploads, если её нет
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir);
 }
 app.use('/uploads', express.static(uploadDir));
 
-// Настройка Multer с фиксом кириллицы (русских букв)
+// Хранилище зарегистрированных пользователей в файле users.json
+const usersFile = path.join(__dirname, 'users.json');
+let registeredUsers = {};
+if (fs.existsSync(usersFile)) {
+    try { registeredUsers = JSON.parse(fs.readFileSync(usersFile, 'utf8')); } catch(e) {}
+}
+
+function saveUsers() {
+    fs.writeFileSync(usersFile, JSON.stringify(registeredUsers, null, 2), 'utf8');
+}
+
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadDir),
     filename: (req, file, cb) => {
-        // Декодируем имя файла из latin1 в utf-8 для корректной работы с русскими буквами
         const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
         cb(null, uniqueSuffix + '-' + originalName);
@@ -31,16 +39,12 @@ const upload = multer({ storage });
 
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 let onlineUsers = {}; // { socketId: { username, status } }
 let messageHistory = [];
 
-// Эндпоинт для загрузки файлов в облако
 app.post('/upload', upload.array('files'), (req, res) => {
     if (!req.files || req.files.length === 0) {
         return res.status(400).json({ error: 'Файлы не загружены' });
@@ -57,31 +61,57 @@ app.post('/upload', upload.array('files'), (req, res) => {
 });
 
 io.on('connection', (socket) => {
-    console.log('Новое подключение:', socket.id);
-
-    // Вход пользователя в сеть
-    socket.on('user_join', ({ username, isGhost }) => {
+    // Регистрация нового пользователя
+    socket.on('register_user', ({ username, password }) => {
         const cleanName = username.trim();
-        onlineUsers[socket.id] = { 
-            username: cleanName, 
-            status: isGhost ? 'offline' : 'online' 
-        };
-
-        // Рассылаем обновленный список контактов в сети
-        io.emit('user_list', Object.values(onlineUsers));
-        // Отправляем подключенному пользователю историю сообщений
-        socket.emit('message_history', messageHistory);
-    });
-
-    // Переключение Ghost Mode
-    socket.on('toggle_ghost', (isGhost) => {
-        if (onlineUsers[socket.id]) {
-            onlineUsers[socket.id].status = isGhost ? 'offline' : 'online';
-            io.emit('user_list', Object.values(onlineUsers));
+        if (registeredUsers[cleanName.toLowerCase()]) {
+            socket.emit('register_response', { success: false, message: 'Это имя уже занято!' });
+        } else {
+            registeredUsers[cleanName.toLowerCase()] = { username: cleanName, password: password };
+            saveUsers();
+            socket.emit('register_response', { success: true });
         }
     });
 
-    // Отправка нового сообщения
+    // Авторизация
+    socket.on('user_login', ({ username, password, isGhost }) => {
+        const cleanName = username.trim();
+        const userInDb = registeredUsers[cleanName.toLowerCase()];
+
+        if (!userInDb) {
+            socket.emit('login_response', { success: false, message: 'Пользователь не найден!' });
+            return;
+        }
+
+        if (userInDb.password !== password) {
+            socket.emit('login_response', { success: false, message: 'Неверный пароль!' });
+            return;
+        }
+
+        onlineUsers[socket.id] = { username: cleanName, status: isGhost ? 'offline' : 'online' };
+        socket.emit('login_response', { success: true });
+
+        // Отправляем список всех зарегистрированных пользователей
+        const allUsersList = Object.values(registeredUsers).map(u => {
+            const isOnline = Object.values(onlineUsers).some(o => o.username.toLowerCase() === u.username.toLowerCase() && o.status === 'online');
+            return { username: u.username, status: isOnline ? 'online' : 'offline' };
+        });
+
+        io.emit('user_list', allUsersList);
+        socket.emit('message_history', messageHistory);
+    });
+
+    socket.on('toggle_ghost', (isGhost) => {
+        if (onlineUsers[socket.id]) {
+            onlineUsers[socket.id].status = isGhost ? 'offline' : 'online';
+            const allUsersList = Object.values(registeredUsers).map(u => {
+                const isOnline = Object.values(onlineUsers).some(o => o.username.toLowerCase() === u.username.toLowerCase() && o.status === 'online');
+                return { username: u.username, status: isOnline ? 'online' : 'offline' };
+            });
+            io.emit('user_list', allUsersList);
+        }
+    });
+
     socket.on('send_message', (data) => {
         const senderInfo = onlineUsers[socket.id];
         const senderName = senderInfo ? senderInfo.username : 'Аноним';
@@ -91,6 +121,7 @@ io.on('connection', (socket) => {
             sender: senderName,
             text: data.text || '',
             isEncrypted: data.isEncrypted || false,
+            targetPrivate: data.targetPrivate || null,
             replyTo: data.replyTo || null,
             files: data.files || [],
             timestamp: data.timestamp,
@@ -99,18 +130,15 @@ io.on('connection', (socket) => {
         };
 
         messageHistory.push(newMsg);
-        if (messageHistory.length > 200) messageHistory.shift(); // Храним последние 200 сообщений
+        if (messageHistory.length > 300) messageHistory.shift();
 
         io.emit('new_message', newMsg);
     });
 
-    // ================= WebRTC & Звонки & Молоточек =================
-    // Сервер пересылает сигналы звонков, WebRTC офферы и удары молоточком всем клиентам
     socket.on('webrtc_signal', (data) => {
         io.emit('webrtc_signal', data);
     });
 
-    // Подтверждение доставки и прочтения сообщений
     socket.on('ack_delivery', ({ msgId }) => {
         const msg = messageHistory.find(m => m.id === msgId);
         if (msg && msg.status !== 'read') {
@@ -127,7 +155,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Добавление и снятие реакций (эмодзи)
     socket.on('add_reaction', ({ msgId, emoji }) => {
         const user = onlineUsers[socket.id];
         if (!user) return;
@@ -135,19 +162,16 @@ io.on('connection', (socket) => {
         const msg = messageHistory.find(m => m.id === msgId);
         if (msg) {
             if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
-            
             const idx = msg.reactions[emoji].indexOf(user.username);
             if (idx > -1) {
                 msg.reactions[emoji].splice(idx, 1);
             } else {
                 msg.reactions[emoji].push(user.username);
             }
-
             io.emit('reaction_updated', { msgId, reactions: msg.reactions });
         }
     });
 
-    // Индикатор "Печатает..."
     socket.on('typing', (isTyping) => {
         const user = onlineUsers[socket.id];
         if (user) {
@@ -155,26 +179,38 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Редактирование текста сообщения
-    socket.on('edit_message', ({ msgId, newText }) => {
+    socket.on('edit_message', ({ msgId, newText, editTime }) => {
         const msg = messageHistory.find(m => m.id === msgId);
         if (msg) {
             msg.text = newText;
-            io.emit('message_edited', { msgId, newText });
+            msg.editTime = editTime;
+            io.emit('message_edited', { msgId, newText, editTime });
         }
     });
 
-    // Удаление сообщения для всех
     socket.on('delete_message', ({ msgId }) => {
         messageHistory = messageHistory.filter(m => m.id !== msgId);
         io.emit('message_deleted', { msgId });
     });
 
-    // Отключение пользователя
+    socket.on('delete_user_account', ({ username }) => {
+        delete registeredUsers[username.toLowerCase()];
+        saveUsers();
+        delete onlineUsers[socket.id];
+        const allUsersList = Object.values(registeredUsers).map(u => {
+            const isOnline = Object.values(onlineUsers).some(o => o.username.toLowerCase() === u.username.toLowerCase() && o.status === 'online');
+            return { username: u.username, status: isOnline ? 'online' : 'offline' };
+        });
+        io.emit('user_list', allUsersList);
+    });
+
     socket.on('disconnect', () => {
         delete onlineUsers[socket.id];
-        io.emit('user_list', Object.values(onlineUsers));
-        console.log('Отключился:', socket.id);
+        const allUsersList = Object.values(registeredUsers).map(u => {
+            const isOnline = Object.values(onlineUsers).some(o => o.username.toLowerCase() === u.username.toLowerCase() && o.status === 'online');
+            return { username: u.username, status: isOnline ? 'online' : 'offline' };
+        });
+        io.emit('user_list', allUsersList);
     });
 });
 
